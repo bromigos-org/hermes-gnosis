@@ -393,3 +393,109 @@ def test_system_prompt_block_degrades_without_backend():
     block = provider.system_prompt_block()
     assert block.startswith("# Gnosis Memory")
     assert "Top stored memories" not in block
+
+
+# ---------------------------------------------------------------------------
+# Own space and read-only shared spaces
+# ---------------------------------------------------------------------------
+
+READ_SPACES = [
+    {"space_id": "vector", "user_id": "operator", "label": "VECTOR's memory", "limit": 2},
+    {"space_id": "kb-homelab", "user_id": "kb-homelab", "label": "homelab docs"},
+]
+
+
+def _shared_app():
+    """Answers each space with a hit naming that space."""
+    class App(RecordingApp):
+        def __call__(self, request):
+            self.requests.append(request)
+            import httpx
+            body = json.loads(request.content.decode("utf-8") or "{}")
+            space = (body.get("scope") or {}).get("space_id")
+            if request.url.path == "/v1/memories/search":
+                return httpx.Response(200, json={"results": [
+                    {"memory_id": f"m-{space}", "content": f"fact from {space}", "score": 0.9}]})
+            if request.url.path == "/v1/memory/context":
+                return httpx.Response(200, json={"sections": [
+                    {"source": "long_term", "content": f"- own fact in {space}"}]})
+            return httpx.Response(200, json={"results": []})
+    return App()
+
+
+def test_configured_space_and_visibility(app):
+    provider = make_provider(app, session_id="s", user_id="operator")
+    provider._space_id = "bromigo"
+    provider._visibility = "agent_shared"
+    scope = provider._scope()
+    assert scope["space_id"] == "bromigo"
+    assert scope["visibility"] == "agent_shared"
+
+
+def test_read_scope_uses_space_keys(app):
+    provider = make_provider(app, session_id="s", user_id="operator")
+    provider._agent_id = "bromigo"
+    provider._tenant_id = "bromigos"
+    scope = provider._read_scope(READ_SPACES[1])
+    assert scope == {"tenant_id": "bromigos", "space_id": "kb-homelab", "agent_id": "bromigo",
+                     "session_id": "s", "user_id": "kb-homelab", "visibility": "private_user"}
+
+
+def test_prefetch_merges_read_spaces():
+    app = _shared_app()
+    provider = make_provider(app, user_id="operator")
+    provider._space_id = "bromigo"
+    provider._read_spaces = READ_SPACES
+    block = provider.prefetch("what did we decide?")
+    assert "own fact in bromigo" in block
+    assert "### VECTOR's memory (read only)" in block
+    assert "fact from vector" in block and "fact from kb-homelab" in block
+    searches = [json.loads(r.content) for r in app.requests if r.url.path == "/v1/memories/search"]
+    assert {b["scope"]["space_id"] for b in searches} == {"vector", "kb-homelab"}
+    assert all(b["use_llm"] is False for b in searches)
+    assert {b["scope"]["space_id"]: b["limit"] for b in searches}["vector"] == 2
+
+
+def test_read_space_failure_does_not_break_recall():
+    import httpx
+
+    class App(RecordingApp):
+        def __call__(self, request):
+            self.requests.append(request)
+            body = json.loads(request.content.decode("utf-8") or "{}")
+            if body.get("scope", {}).get("space_id") == "vector":
+                return httpx.Response(403, json={"detail": "outside this token's grants"})
+            if request.url.path == "/v1/memory/context":
+                return httpx.Response(200, json={"sections": [{"source": "long_term", "content": "- mine"}]})
+            return httpx.Response(200, json={"results": [{"memory_id": "k", "content": "kb hit"}]})
+    app = App()
+    provider = make_provider(app, user_id="operator")
+    provider._read_spaces = READ_SPACES
+    block = provider.prefetch("q")
+    assert "- mine" in block and "kb hit" in block
+    assert provider._consecutive_failures == 0
+
+
+def test_search_tool_tags_shared_hits_without_ids():
+    app = _shared_app()
+    provider = make_provider(app, user_id="operator")
+    provider._space_id = "bromigo"
+    provider._read_spaces = READ_SPACES
+    result = json.loads(provider.handle_tool_call("gnosis_search", {"query": "q"}))
+    own = [r for r in result["results"] if "space" not in r]
+    shared = [r for r in result["results"] if "space" in r]
+    assert own[0]["id"] == "m-bromigo"
+    assert {r["space"] for r in shared} == {"vector", "kb-homelab"}
+    assert all("id" not in r for r in shared)
+
+
+def test_writes_only_go_to_own_space():
+    app = _shared_app()
+    provider = make_provider(app, user_id="operator")
+    provider._space_id = "bromigo"
+    provider._read_spaces = READ_SPACES
+    provider.handle_tool_call("gnosis_add", {"content": "the host likes brevity"})
+    provider.sync_turn("hi", "hello")
+    _join_background(provider)
+    writes = [json.loads(r.content) for r in app.requests if r.url.path == "/v1/memories"]
+    assert writes and all(w["scope"]["space_id"] == "bromigo" for w in writes)

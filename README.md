@@ -125,6 +125,20 @@ when that variable is unset. Behavioral settings are read from
 | `timeout` / `GNOSIS_TIMEOUT` | `10` seconds | Default `httpx` timeout for read/search/context/list/update/delete requests, including the startup list request. |
 | `add_timeout` / `GNOSIS_ADD_TIMEOUT` | `30` seconds | Explicit timeout for every `POST /v1/memories` add, including verbatim `gnosis_add` and `sync_turn` extraction. |
 | `recall_mode` / `GNOSIS_RECALL_MODE` | `context` | `context` uses the full read pipeline; `search` uses raw vector search. |
+| `space_id` / `GNOSIS_SPACE_ID` | `hermes` | The space this agent writes and recalls. |
+| `visibility` / `GNOSIS_VISIBILITY` | `private_user` | Scope visibility of that space. |
+| `read_spaces` (JSON file only) | `[]` | Other spaces searched read only, LLM-free, at recall time and by `gnosis_search`. Each entry: `space_id` (required), `user_id`, `label`, `limit` (default 3), and optionally `agent_id`, `visibility`, `tenant_id`. Nothing is ever written to them. |
+
+`gnosis_url` may carry a path prefix, for a policy proxy in front of Gnosis
+(the homelab's gnosis-gate is `http://gnosis-gate.gnosis.svc.cluster.local:8080/gate`):
+requests go to `<gnosis_url>/v1/...`, and the token is then the proxy's.
+
+Shared spaces in recall: each read space is searched in parallel with the own
+recall and the hits are appended under `## Shared memory`, one `### <label>
+(read only)` block per space. A space that fails (a 403 outside the token's
+grants, a timeout) is skipped without tripping the circuit breaker. In
+`gnosis_search` results, shared hits carry `space` and `source` and no `id`,
+so `gnosis_update` and `gnosis_delete` can only reach the own space.
 
 The token is `GNOSIS_SERVICE_TOKEN`. A non-empty token in the environment
 always wins over a plaintext `gnosis_token` in `gnosis.json`; the latter is
@@ -181,11 +195,11 @@ Every request carries this scope:
 ```json
 {
   "tenant_id": "<tenant_id>",
-  "space_id": "hermes",
+  "space_id": "<space_id, default hermes>",
   "agent_id": "<agent_id>",
   "session_id": "<Hermes session id or hermes>",
   "user_id": "<user_id>",
-  "visibility": "private_user"
+  "visibility": "<visibility, default private_user>"
 }
 ```
 

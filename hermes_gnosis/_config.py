@@ -17,6 +17,17 @@ Mirrors the mem0 plugin's config pattern:
     recall_mode   — source for per-turn injected recall: "context" (full
                     gnosis read pipeline via /v1/memory/context, default) or
                     "search" (raw vector search)
+    space_id      — the space this agent writes and recalls (default: "hermes")
+    visibility    — scope visibility for the own space (default: "private_user")
+    read_spaces   — extra spaces searched read-only at recall time and by
+                    gnosis_search, e.g. another assistant's memory or a
+                    knowledge base. A list of objects:
+                    {"space_id": "vector", "user_id": "operator",
+                     "label": "VECTOR's memory", "limit": 3,
+                     "agent_id"?, "visibility"?}. Never written to.
+
+``gnosis_url`` may carry a path prefix (e.g. a policy proxy such as
+``http://gnosis-gate:8080/gate``); requests go to ``<gnosis_url>/v1/...``.
 
 Matching GNOSIS_URL / GNOSIS_USER_ID / GNOSIS_AGENT_ID / GNOSIS_TENANT_ID /
 GNOSIS_TIMEOUT / GNOSIS_ADD_TIMEOUT / GNOSIS_RECALL_MODE env vars are read as
@@ -28,7 +39,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 CONFIG_FILENAME = "gnosis.json"
 
@@ -36,6 +47,7 @@ DEFAULT_USER_ID = "hermes-user"
 DEFAULT_AGENT_ID = "hermes"
 DEFAULT_TENANT_ID = "nolgia"
 DEFAULT_SPACE_ID = "hermes"
+DEFAULT_VISIBILITY = "private_user"
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_ADD_TIMEOUT = 30.0
 # Per-turn injected recall source: "context" runs gnosis's full read pipeline
@@ -61,6 +73,14 @@ def _as_float(value: Any, fallback: float) -> float:
         return fallback
 
 
+def _read_spaces(value: Any) -> List[Dict[str, Any]]:
+    """Keep only well-formed read-space entries (a dict with a space_id)."""
+    if not isinstance(value, list):
+        return []
+    return [dict(v) for v in value
+            if isinstance(v, dict) and isinstance(v.get("space_id"), str) and v["space_id"]]
+
+
 def load_config() -> Dict[str, Any]:
     """Load config from env vars, with $HERMES_HOME/gnosis.json overrides.
 
@@ -77,6 +97,9 @@ def load_config() -> Dict[str, Any]:
         "timeout": _as_float(os.environ.get("GNOSIS_TIMEOUT"), DEFAULT_TIMEOUT),
         "add_timeout": _as_float(os.environ.get("GNOSIS_ADD_TIMEOUT"), DEFAULT_ADD_TIMEOUT),
         "recall_mode": os.environ.get("GNOSIS_RECALL_MODE", DEFAULT_RECALL_MODE),
+        "space_id": os.environ.get("GNOSIS_SPACE_ID", DEFAULT_SPACE_ID),
+        "visibility": os.environ.get("GNOSIS_VISIBILITY", DEFAULT_VISIBILITY),
+        "read_spaces": [],
     }
     # Only carry user_id when the operator explicitly configured one, so
     # initialize() can fall back to the gateway-native id from kwargs
@@ -99,6 +122,7 @@ def load_config() -> Dict[str, Any]:
     if env_token:
         config["gnosis_token"] = env_token
 
+    config["read_spaces"] = _read_spaces(config.get("read_spaces"))
     config["timeout"] = _as_float(config.get("timeout"), DEFAULT_TIMEOUT)
     config["add_timeout"] = _as_float(config.get("add_timeout"), DEFAULT_ADD_TIMEOUT)
     return config

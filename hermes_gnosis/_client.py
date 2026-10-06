@@ -126,8 +126,13 @@ class GnosisClient:
 
     def search(
         self, scope: Dict[str, Any], query: str, *, limit: int = 10,
+        use_llm: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
-        body = {"scope": scope, "query": query, "limit": limit}
+        body: Dict[str, Any] = {"scope": scope, "query": query, "limit": limit}
+        if use_llm is not None:
+            # False skips gnosis's LLM legs (rerank/expansion): plain vector
+            # recall in ~0.3 s, used for the read-only shared spaces.
+            body["use_llm"] = use_llm
         response = self._request("POST", "/v1/memories/search", json_body=body)
         results = response.get("results", [])
         return results if isinstance(results, list) else []

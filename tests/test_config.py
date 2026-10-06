@@ -120,3 +120,27 @@ def test_initialize_user_id_resolution(monkeypatch, tmp_path):
     provider.initialize("sess-1", user_id="tg-12345")
     assert provider._user_id == "lesse"
     provider.shutdown()
+
+
+def test_space_and_read_spaces_from_file(tmp_path, monkeypatch):
+    import json as _json
+    from hermes_gnosis import _config
+    monkeypatch.setattr(_config, "get_hermes_home", lambda: tmp_path)
+    (tmp_path / "gnosis.json").write_text(_json.dumps({
+        "space_id": "bromigo",
+        "read_spaces": [{"space_id": "vector", "user_id": "operator"}, {"nope": 1}, "bad"],
+    }))
+    cfg = _config.load_config()
+    assert cfg["space_id"] == "bromigo"
+    assert cfg["visibility"] == "private_user"
+    assert cfg["read_spaces"] == [{"space_id": "vector", "user_id": "operator"}]
+
+
+def test_space_defaults(tmp_path, monkeypatch):
+    from hermes_gnosis import _config
+    monkeypatch.setattr(_config, "get_hermes_home", lambda: tmp_path)
+    for k in ("GNOSIS_SPACE_ID", "GNOSIS_VISIBILITY"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = _config.load_config()
+    assert cfg["space_id"] == "hermes"
+    assert cfg["read_spaces"] == []

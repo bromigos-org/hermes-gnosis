@@ -22,6 +22,12 @@ Behavioral settings (live in $HERMES_HOME/gnosis.json, set via
   recall_mode — source for per-turn injected recall: "context" (full gnosis
                 read pipeline via /v1/memory/context, default) or "search"
                 (raw vector search)
+  space_id    — the space this agent writes and recalls (default: "hermes")
+  visibility  — scope visibility of that space (default: "private_user")
+  read_spaces — other spaces searched read-only at recall time and by
+                gnosis_search (another assistant's memory, a knowledge base):
+                [{"space_id", "user_id", "label", "limit", "agent_id"?,
+                "visibility"?}]. Writes only ever go to space_id.
 
 Matching GNOSIS_URL / GNOSIS_USER_ID / GNOSIS_AGENT_ID / GNOSIS_TENANT_ID /
 GNOSIS_TIMEOUT / GNOSIS_ADD_TIMEOUT / GNOSIS_RECALL_MODE env vars are read as
@@ -36,6 +42,7 @@ import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from ._compat import MemoryProvider, tool_error
@@ -45,6 +52,7 @@ from ._config import (
     DEFAULT_SPACE_ID,
     DEFAULT_TENANT_ID,
     DEFAULT_USER_ID,
+    DEFAULT_VISIBILITY,
     TOKEN_ENV_VAR,
     load_config,
     save_config_file,
@@ -102,7 +110,9 @@ SEARCH_SCHEMA = {
         "what you know about the user (preferences, facts, history, people, "
         "projects, past decisions). For multi-part or multi-hop questions, "
         "call it MULTIPLE times — vary the wording and run follow-up searches "
-        "on what earlier results reveal; one search is rarely enough."
+        "on what earlier results reveal; one search is rarely enough. When "
+        "shared spaces are configured, their hits come back too, tagged with "
+        "their source and read only."
     ),
     "parameters": {
         "type": "object",
@@ -182,6 +192,9 @@ class GnosisMemoryProvider(MemoryProvider):
         self._user_id = DEFAULT_USER_ID
         self._agent_id = DEFAULT_AGENT_ID
         self._tenant_id = DEFAULT_TENANT_ID
+        self._space_id = DEFAULT_SPACE_ID
+        self._visibility = DEFAULT_VISIBILITY
+        self._read_spaces: List[Dict[str, Any]] = []
         self._session_id = ""
         self._channel = "cli"  # gateway channel name (cli/telegram/discord/...)
         self._agent_context = "primary"
@@ -253,6 +266,9 @@ class GnosisMemoryProvider(MemoryProvider):
         self._agent_id = self._config.get("agent_id", DEFAULT_AGENT_ID)
         self._tenant_id = self._config.get("tenant_id", DEFAULT_TENANT_ID)
         self._recall_mode = self._config.get("recall_mode", DEFAULT_RECALL_MODE)
+        self._space_id = self._config.get("space_id") or DEFAULT_SPACE_ID
+        self._visibility = self._config.get("visibility") or DEFAULT_VISIBILITY
+        self._read_spaces = list(self._config.get("read_spaces") or [])
         self._channel = kwargs.get("platform") or "cli"
         # Skip writes for non-primary contexts (cron system prompts would
         # corrupt user representations — see the ABC docstring).
@@ -303,12 +319,61 @@ class GnosisMemoryProvider(MemoryProvider):
         """
         return {
             "tenant_id": self._tenant_id,
-            "space_id": DEFAULT_SPACE_ID,
+            "space_id": self._space_id,
             "agent_id": self._agent_id,
             "session_id": self._session_id or _FALLBACK_SESSION_ID,
             "user_id": self._user_id,
-            "visibility": "private_user",
+            "visibility": self._visibility,
         }
+
+    def _read_scope(self, space: Dict[str, Any]) -> Dict[str, Any]:
+        """Scope for a read-only shared space (its own user/agent keys)."""
+        return {
+            "tenant_id": space.get("tenant_id") or self._tenant_id,
+            "space_id": space["space_id"],
+            "agent_id": space.get("agent_id") or self._agent_id,
+            "session_id": self._session_id or _FALLBACK_SESSION_ID,
+            "user_id": space.get("user_id") or self._user_id,
+            "visibility": space.get("visibility") or "private_user",
+        }
+
+    def _search_read_spaces(self, query: str, *, limit: Optional[int] = None,
+                            client: Optional[GnosisClient] = None) -> List[Dict[str, Any]]:
+        """Search every read space in parallel; one failing space never fails the rest.
+
+        Returns ``[{"space", "label", "results": [...]}]`` for spaces with hits.
+        LLM-free (use_llm=False) so it fits the prefetch hot path.
+        """
+        client = client or self._client
+        spaces = self._read_spaces
+        if not spaces or client is None or not query:
+            return []
+
+        def one(space: Dict[str, Any]) -> Dict[str, Any]:
+            n = limit or int(space.get("limit") or 3)
+            try:
+                hits = client.search(self._read_scope(space), query,
+                                     limit=max(1, min(n, 20)), use_llm=False)
+            except Exception as e:  # a 403 or a slow space is skipped, not fatal
+                logger.debug("Gnosis read-space %s failed: %s", space.get("space_id"), e)
+                hits = []
+            return {"space": space["space_id"],
+                    "label": space.get("label") or space["space_id"],
+                    "results": [h for h in hits if h.get("content")]}
+
+        with ThreadPoolExecutor(max_workers=min(8, len(spaces))) as pool:
+            found = list(pool.map(one, spaces))
+        return [f for f in found if f["results"]]
+
+    @staticmethod
+    def _render_shared(found: List[Dict[str, Any]]) -> str:
+        if not found:
+            return ""
+        parts = []
+        for f in found:
+            lines = "\n".join(f"- {h['content']}" for h in f["results"])
+            parts.append(f"### {f['label']} (read only)\n{lines}")
+        return "## Shared memory\n" + "\n\n".join(parts)
 
     def _write_metadata(self) -> Dict[str, Any]:
         # Tag every write with the gateway channel so per-channel filtered
@@ -391,6 +456,10 @@ class GnosisMemoryProvider(MemoryProvider):
             "gnosis_list for a full overview, gnosis_update and gnosis_delete "
             "to manage by ID."
         )
+        if self._read_spaces:
+            labels = ", ".join(sp.get("label") or sp["space_id"] for sp in self._read_spaces)
+            header += (f"\nShared spaces, searched read only alongside yours: {labels}. "
+                       "You never write to them.")
         thread = self._top_memories_thread
         if thread and thread.is_alive():
             thread.join(timeout=_TOP_MEMORIES_WAIT_SECS)
@@ -468,6 +537,15 @@ class GnosisMemoryProvider(MemoryProvider):
 
         def _run():
             body = ""
+            shared: Dict[str, str] = {}
+            shared_thread = None
+            if self._read_spaces:
+                def _shared():
+                    shared["block"] = self._render_shared(
+                        self._search_read_spaces(query, client=client))
+                shared_thread = threading.Thread(
+                    target=_shared, daemon=True, name="gnosis-prefetch-shared")
+                shared_thread.start()
             try:
                 if self._recall_mode == "context":
                     # Prefer gnosis's full read pipeline (adaptive routing,
@@ -497,6 +575,11 @@ class GnosisMemoryProvider(MemoryProvider):
             except Exception as e:
                 self._record_failure()
                 logger.debug("Gnosis prefetch failed: %s", e)
+            if shared_thread is not None:
+                shared_thread.join(timeout=_PREFETCH_WAIT_SECS)
+                extra = shared.get("block", "")
+                if extra:
+                    body = f"{body}\n\n{extra}" if body else extra
             with self._prefetch_lock:
                 if self._prefetch_query == query:
                     self._prefetch_result = body
@@ -634,10 +717,17 @@ class GnosisMemoryProvider(MemoryProvider):
             limit = max(1, min(int(args.get("limit", 10)), 50))
             results = self._client.search(self._scope(), query, limit=limit)
             self._record_success()
-            if not results:
-                return json.dumps({"result": "No relevant memories found."})
             items = [{"id": r.get("memory_id"), "memory": r.get("content", ""),
                       "score": r.get("score", 0)} for r in results]
+            if self._read_spaces:
+                # Shared spaces are read only: their items carry the space and
+                # no id, so gnosis_update/gnosis_delete can't be aimed at them.
+                for found in self._search_read_spaces(query):
+                    items += [{"space": found["space"], "source": found["label"],
+                               "memory": r.get("content", ""), "score": r.get("score", 0)}
+                              for r in found["results"]]
+            if not items:
+                return json.dumps({"result": "No relevant memories found."})
             return json.dumps({"results": items, "count": len(items)})
         except Exception as e:
             if not self._is_client_error(e):
