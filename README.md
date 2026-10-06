@@ -1,5 +1,15 @@
 # hermes-gnosis
 
+> **About this copy (bromigos-org/hermes-gnosis).** This is a GitHub fork of
+> [nolgiainc/hermes-gnosis](https://github.com/nolgiainc/hermes-gnosis), created
+> on 2026-07-25 after the plugin moved to nolgiainc. It carries **no changes of
+> its own**; as of 2026-10-05 upstream is one CI-only commit ahead (gitleaks and
+> Dependabot config). It is **still in use**: the Bromigos `bromigo` Hermes agent
+> installs this plugin from this fork's `main` when its pod starts, so keep the
+> fork until that install points at upstream. The rest of this README is
+> upstream's. Bromigos operators can find the deployment details in the network
+> systems map, `docs/SYSTEMS.md` in the private `bromigos-org/platform` repository.
+
 `hermes-gnosis` is an out-of-tree [hermes-agent](https://github.com/NousResearch/hermes-agent)
 memory provider backed by a self-hosted [gnosis](https://github.com/nolgiainc/gnosis)
 service. It implements the Hermes `MemoryProvider` interface and exposes scoped
