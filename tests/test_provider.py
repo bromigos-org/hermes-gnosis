@@ -509,3 +509,13 @@ def test_search_recall_can_skip_llm():
     provider.prefetch("q")
     body = [json.loads(r.content) for r in app.requests if r.url.path == "/v1/memories/search"][0]
     assert body["use_llm"] is False
+
+
+def test_top_memories_zero_skips_fetch_and_list():
+    app = RecordingApp(responses={("POST", "/v1/memories/list"): (200, {"results": [{"memory_id": "m", "content": "x"}]})})
+    provider = make_provider(app)
+    provider._top_count = 0
+    provider._start_top_memories_fetch()
+    block = provider.system_prompt_block()
+    assert "Top stored memories" not in block
+    assert not [r for r in app.requests if r.url.path == "/v1/memories/list"]

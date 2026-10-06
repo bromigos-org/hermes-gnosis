@@ -24,6 +24,8 @@ Behavioral settings (live in $HERMES_HOME/gnosis.json, set via
                 (raw vector search)
   space_id    — the space this agent writes and recalls (default: "hermes")
   visibility  — scope visibility of that space (default: "private_user")
+  top_memories — recent memories listed in the system prompt (default 5; 0
+                keeps the prompt stable for prompt caching)
   recall_use_llm — false: the per-turn "search" recall skips gnosis's LLM
                 legs (~0.15 s instead of ~0.6 s)
   read_spaces — other spaces searched read-only at recall time and by
@@ -198,6 +200,7 @@ class GnosisMemoryProvider(MemoryProvider):
         self._visibility = DEFAULT_VISIBILITY
         self._read_spaces: List[Dict[str, Any]] = []
         self._recall_use_llm: Optional[bool] = None
+        self._top_count = _TOP_MEMORIES_COUNT
         self._session_id = ""
         self._channel = "cli"  # gateway channel name (cli/telegram/discord/...)
         self._agent_context = "primary"
@@ -276,6 +279,13 @@ class GnosisMemoryProvider(MemoryProvider):
         # (~0.15 s instead of ~0.6 s); None keeps gnosis's default.
         flag = self._config.get("recall_use_llm")
         self._recall_use_llm = flag if isinstance(flag, bool) else None
+        # top_memories: how many recent memories to list in the system prompt
+        # (default 5). 0 keeps the system prompt identical turn to turn, so a
+        # server-side prompt cache keeps hitting past it.
+        try:
+            self._top_count = max(0, int(self._config.get("top_memories", _TOP_MEMORIES_COUNT)))
+        except (TypeError, ValueError):
+            self._top_count = _TOP_MEMORIES_COUNT
         self._channel = kwargs.get("platform") or "cli"
         # Skip writes for non-primary contexts (cron system prompts would
         # corrupt user representations — see the ABC docstring).
@@ -429,13 +439,13 @@ class GnosisMemoryProvider(MemoryProvider):
     def _start_top_memories_fetch(self) -> None:
         """Warm the top-memories cache for system_prompt_block (non-blocking)."""
         client = self._client
-        if client is None:
+        if client is None or self._top_count == 0:
             return
 
         def _run():
             try:
                 response = client.list(
-                    self._scope(), page=1, page_size=_TOP_MEMORIES_COUNT,
+                    self._scope(), page=1, page_size=self._top_count,
                 )
                 self._top_memories = [
                     m.get("content", "") for m in response.get("results", [])

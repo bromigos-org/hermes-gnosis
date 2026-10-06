@@ -127,6 +127,7 @@ when that variable is unset. Behavioral settings are read from
 | `recall_mode` / `GNOSIS_RECALL_MODE` | `context` | `context` uses the full read pipeline; `search` uses raw vector search. |
 | `space_id` / `GNOSIS_SPACE_ID` | `hermes` | The space this agent writes and recalls. |
 | `visibility` / `GNOSIS_VISIBILITY` | `private_user` | Scope visibility of that space. |
+| `top_memories` (JSON file only) | `5` | Recent memories listed in the system prompt. `0` lists none, so the system prompt stays identical turn to turn and a server-side prompt cache keeps hitting. |
 | `recall_use_llm` (JSON file only) | unset | `false` makes the per-turn `search` recall LLM-free (~0.15 s instead of ~0.6 s); unset keeps Gnosis's default. |
 | `read_spaces` (JSON file only) | `[]` | Other spaces searched read only, LLM-free, at recall time and by `gnosis_search`. Each entry: `space_id` (required), `user_id`, `label`, `limit` (default 3), and optionally `agent_id`, `visibility`, `tenant_id`. Nothing is ever written to them. |
 
