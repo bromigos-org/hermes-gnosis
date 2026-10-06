@@ -499,3 +499,13 @@ def test_writes_only_go_to_own_space():
     _join_background(provider)
     writes = [json.loads(r.content) for r in app.requests if r.url.path == "/v1/memories"]
     assert writes and all(w["scope"]["space_id"] == "bromigo" for w in writes)
+
+
+def test_search_recall_can_skip_llm():
+    app = _shared_app()
+    provider = make_provider(app, user_id="bromigo")
+    provider._recall_mode = "search"
+    provider._recall_use_llm = False
+    provider.prefetch("q")
+    body = [json.loads(r.content) for r in app.requests if r.url.path == "/v1/memories/search"][0]
+    assert body["use_llm"] is False

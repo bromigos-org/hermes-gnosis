@@ -24,6 +24,8 @@ Behavioral settings (live in $HERMES_HOME/gnosis.json, set via
                 (raw vector search)
   space_id    — the space this agent writes and recalls (default: "hermes")
   visibility  — scope visibility of that space (default: "private_user")
+  recall_use_llm — false: the per-turn "search" recall skips gnosis's LLM
+                legs (~0.15 s instead of ~0.6 s)
   read_spaces — other spaces searched read-only at recall time and by
                 gnosis_search (another assistant's memory, a knowledge base):
                 [{"space_id", "user_id", "label", "limit", "agent_id"?,
@@ -195,6 +197,7 @@ class GnosisMemoryProvider(MemoryProvider):
         self._space_id = DEFAULT_SPACE_ID
         self._visibility = DEFAULT_VISIBILITY
         self._read_spaces: List[Dict[str, Any]] = []
+        self._recall_use_llm: Optional[bool] = None
         self._session_id = ""
         self._channel = "cli"  # gateway channel name (cli/telegram/discord/...)
         self._agent_context = "primary"
@@ -269,6 +272,10 @@ class GnosisMemoryProvider(MemoryProvider):
         self._space_id = self._config.get("space_id") or DEFAULT_SPACE_ID
         self._visibility = self._config.get("visibility") or DEFAULT_VISIBILITY
         self._read_spaces = list(self._config.get("read_spaces") or [])
+        # recall_use_llm: false makes the per-turn "search" recall LLM-free
+        # (~0.15 s instead of ~0.6 s); None keeps gnosis's default.
+        flag = self._config.get("recall_use_llm")
+        self._recall_use_llm = flag if isinstance(flag, bool) else None
         self._channel = kwargs.get("platform") or "cli"
         # Skip writes for non-primary contexts (cron system prompts would
         # corrupt user representations — see the ABC docstring).
@@ -528,7 +535,8 @@ class GnosisMemoryProvider(MemoryProvider):
 
         def _search_block() -> str:
             """Raw vector search + legacy bullet rendering (the "search" path)."""
-            results = client.search(self._scope(), query, limit=10)
+            results = client.search(self._scope(), query, limit=10,
+                                    use_llm=self._recall_use_llm)
             lines = [r.get("content", "") for r in (results or [])
                      if r.get("content")]
             if lines:
